@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
 import uvicorn
@@ -20,7 +20,6 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Websocket ulanishlarni saqlash
 active_websockets = []
 
 @app.websocket("/ws")
@@ -34,35 +33,41 @@ async def websocket_endpoint(websocket: WebSocket):
         active_websockets.remove(websocket)
 
 async def broadcast_to_office(message: dict):
-    for ws in active_websockets:
-        await ws.send_text(json.dumps(message))
+    for ws in list(active_websockets):
+        try:
+            await ws.send_text(json.dumps(message))
+        except:
+            active_websockets.remove(ws)
 
-# Telegram Bot Qismi
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "SIZNING_TOKENINGIZ")
 GEMINI_KEY = os.getenv("GOOGLE_API_KEY", "SIZNING_GEMINI_KALITINGIZ")
 
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_KEY)
 
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Salom! Antigravity AI Coding Factory'ga xush kelibsiz.\nMenga qanday dastur yoki loyiha kerakligini yozing (Masalan: 'Menga oddiy kalkulyator yaratib ber').")
+
 async def handle_telegram_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = update.message.text
-    await update.message.reply_text("🚀 Antigravity Universal AI Coding Factory ishga tushdi! Agentlar jamoasi ishlamoqda...")
+    await update.message.reply_text("🚀 Topshiriq qabul qilindi! Agentlar jamoasi ishga tushdi, Verceldagi saytingizni kuzating...")
 
-    # 1. Boss buyruq beradi
     await broadcast_to_office({"action": "chat", "character": "boss", "text": f"Jamoa, yangi topshiriq keldi: {prompt}"})
     await asyncio.sleep(2)
+
+    loop = asyncio.get_running_loop()
 
     def make_step_callback(character_name, action_text):
         def callback(step_out):
             asyncio.run_coroutine_threadsafe(
                 broadcast_to_office({"action": "chat", "character": character_name, "text": action_text}),
-                asyncio.get_event_loop()
+                loop
             )
         return callback
 
     architect = Agent(
         role='Lead Software & Cloud Solutions Architect',
         goal='Optimal texnologiyalar va fayllar iyerarxiyasini yaratish.',
-        backstory='Siz dunyodagi eng kuchli dasturiy ta\'minot arxitektorisiz.',
+        backstory="Siz dunyodagi eng kuchli dasturiy ta'minot arxitektorisiz.",
         llm=llm,
         step_callback=make_step_callback("architect", "Arxitektura o'ylanmoqda...")
     )
@@ -107,13 +112,13 @@ async def handle_telegram_msg(update: Update, context: ContextTypes.DEFAULT_TYPE
         process=Process.sequential
     )
 
-    result = crew.kickoff()
+    # CrewAI is blocking, so run it in a thread
+    result = await asyncio.to_thread(crew.kickoff)
     result_text = str(result)
 
     await broadcast_to_office({"action": "chat", "character": "boss", "text": "Ajoyib ish bo'ldi jamoa! Loyiha mijozga jo'natilmoqda."})
     await broadcast_to_office({"action": "code_result", "code": result_text})
     
-    # Python script fayllarni ajratib olish va zip qilish
     with tempfile.TemporaryDirectory() as temp_dir:
         files_created = False
         pattern = r"\[START_FILE:\s*(.+?)\](.*?)\[END_FILE:\s*\1\]"
@@ -144,17 +149,21 @@ async def handle_telegram_msg(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_text(f"✅ Kod tayyor, lekin fayl teglari topilmadi. Javob:\n\n```\n{result_text[:4000]}\n```", parse_mode="Markdown")
 
-def run_bot():
-    bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_msg))
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot_app.run_polling(close_loop=False)
+bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
+bot_app.add_handler(CommandHandler("start", start_cmd))
+bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_msg))
 
 @app.on_event("startup")
-def start_background_bot():
-    import threading
-    threading.Thread(target=run_bot, daemon=True).start()
+async def startup_event():
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await bot_app.updater.stop()
+    await bot_app.stop()
+    await bot_app.shutdown()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
